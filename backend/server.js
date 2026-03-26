@@ -100,7 +100,7 @@ ${text.slice(0, 3000)}
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.3,
-            maxOutputTokens: 1500,
+            maxOutputTokens: 3000,
             responseMimeType: "application/json",
           },
         }),
