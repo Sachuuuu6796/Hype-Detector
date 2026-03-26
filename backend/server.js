@@ -8,7 +8,6 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 app.use(cors());
 app.use(express.json({ limit: "20kb" }));
 
-// Simple in-memory rate limiter: 5 requests per IP per day
 const ratemap = new Map();
 
 function rateLimit(req, res, next) {
@@ -20,7 +19,6 @@ function rateLimit(req, res, next) {
     return res.status(429).json({ error: "Daily limit reached (5 analyses/day). Come back tomorrow." });
   }
   ratemap.set(key, count + 1);
-  // Clean old keys every 1000 requests to avoid memory leak
   if (ratemap.size > 1000) {
     for (const [k] of ratemap) {
       if (!k.endsWith(today)) ratemap.delete(k);
@@ -49,42 +47,43 @@ app.post("/analyse", rateLimit, async (req, res) => {
     app: "App Store / Product Hunt description",
   }[type] || "content";
 
-  const prompt = `You are a brutally honest analyst who detects marketing hype. Analyse the following ${typeLabel} and return ONLY a valid JSON object with no markdown, no explanation, no backticks.
+  const prompt = `You are a brutally honest analyst who detects marketing hype.
 
-JSON structure required:
+Analyse the following ${typeLabel}. Your response must be ONLY a raw JSON object.
+Do NOT use markdown. Do NOT use backticks or code fences. Do NOT add any text before or after.
+Your entire response must start with { and end with }
+
+Use this exact JSON structure:
 {
-  "score": <integer 0-100, hype percentage>,
-  "verdict": <short punchy verdict string, max 8 words, e.g. "Smells like a Series A pitch deck">,
-  "concrete_claims": <integer, count of specific verifiable claims>,
-  "vague_claims": <integer, count of vague unsubstantiated claims>,
-  "missing_data": <integer, count of missing evidence items>,
-  "hype_patterns_count": <integer>,
+  "score": 73,
+  "verdict": "Smells like a Series A pitch deck",
+  "concrete_claims": 2,
+  "vague_claims": 9,
+  "missing_data": 5,
+  "hype_patterns_count": 4,
   "flags": [
-    {
-      "severity": <"red" or "amber">,
-      "tag": <short pattern name, max 4 words>,
-      "text": <one sentence explanation, max 20 words>
-    }
+    { "severity": "red", "tag": "No evidence", "text": "One sentence explanation quoting the exact phrase from the text." },
+    { "severity": "amber", "tag": "Undefined term", "text": "One sentence explanation quoting the exact phrase from the text." }
   ],
   "questions": [
-    <string, one sharp question to ask, max 18 words>
+    "Sharp question 1 the reader should ask?",
+    "Sharp question 2 the reader should ask?",
+    "Sharp question 3 the reader should ask?",
+    "Sharp question 4 the reader should ask?",
+    "Sharp question 5 the reader should ask?"
   ],
   "patterns": [
-    {
-      "severity": <"red" or "amber">,
-      "name": <pattern name like "The Vague Superlative">,
-      "text": <one sentence, max 18 words>
-    }
+    { "severity": "red", "name": "The Vague Superlative", "text": "One sentence describing where this appears in the text." },
+    { "severity": "amber", "name": "The Naked Number", "text": "One sentence describing where this appears in the text." }
   ]
 }
 
 Rules:
-- flags: 3 to 5 items
+- score: 0 = fully grounded, 100 = pure marketing fluff
+- verdict: max 8 words, punchy and memorable
+- flags: 3 to 5 items, quote exact phrases from the text
 - questions: exactly 5 items
 - patterns: 3 to 5 items
-- Be specific, quote exact phrases from the text
-- score 0 = zero hype, 100 = pure marketing fluff
-- verdict must be punchy and memorable
 
 Text to analyse:
 """
@@ -93,13 +92,17 @@ ${text.slice(0, 3000)}
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.4, maxOutputTokens: 1500 },
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: 1500,
+            responseMimeType: "application/json",
+          },
         }),
       }
     );
@@ -113,14 +116,18 @@ ${text.slice(0, 3000)}
     const data = await response.json();
     const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-    // Strip any accidental markdown fences
-    const cleaned = raw.replace(/```json|```/g, "").trim();
+    let cleaned = raw.trim();
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+    if (!cleaned.startsWith("{")) {
+      const match = cleaned.match(/\{[\s\S]*\}/);
+      if (match) cleaned = match[0];
+    }
 
     let parsed;
     try {
       parsed = JSON.parse(cleaned);
     } catch {
-      console.error("JSON parse failed:", cleaned.slice(0, 200));
+      console.error("JSON parse failed. Raw:", raw.slice(0, 500));
       return res.status(502).json({ error: "Could not parse AI response. Please try again." });
     }
 
